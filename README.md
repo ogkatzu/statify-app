@@ -13,11 +13,11 @@ The application connects to your Spotify account and provides personalized music
 - **Historical Data**: Track your listening habits over time
 
 ### Screenshots 
-![App Screenshot](app_example.png)
+![App Screenshot](main/app_example.png)
 
 ## General Architecture
 
-![Architecture Overview](General_Diagram_v2.png)
+![Architecture Overview](main/General_Diagram_v2.png)
 
 ## Technology Stack
 
@@ -56,7 +56,7 @@ The application connects to your Spotify account and provides personalized music
 - **Multi-stage Testing** - Unit, integration, and end-to-end tests
 
 ### Jenkins Pipeline
-![Architecture Overview](Jenkins_Pipeline.png)
+![Jenkins Pipeline](main/Jenkins_Pipeline.png)
 
 ## API Endpoints
 
