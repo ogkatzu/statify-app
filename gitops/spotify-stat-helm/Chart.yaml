@@ -1,0 +1,19 @@
+apiVersion: v2
+name: spotify-stat-helm
+description: An Umbrella Helm chart for Spotify Stat App
+
+type: application
+
+version: 1.0.35
+
+appVersion: "1.0.35"
+
+
+dependencies:
+  - name: mongodb
+    version: "15.6.13"
+    repository: "https://charts.bitnami.com/bitnami"
+    condition: mongodb.enabled
+  - name: spotify-stat-app
+    version: 1.0.35
+    repository: file://./charts/spotify-stat-app

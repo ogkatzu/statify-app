@@ -1,0 +1,19 @@
+mongodb:
+  host: spotify-stat-helm-mongodb
+  port: 27017
+  architecture: replicaset
+  replicaCount: 3
+  auth:
+    enabled: true
+    existingSecret: "spotify-credentials"
+    rootUser: "root"
+    usernames:
+      - "spotify_user"
+    databases:
+      - "spotify"
+  persistence:
+    enabled: true
+    storageClass: "gp2"
+    size: 8Gi
+    accessModes:
+      - ReadWriteOnce

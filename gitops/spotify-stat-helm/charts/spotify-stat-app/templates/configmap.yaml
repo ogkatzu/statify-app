@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Values.app.name }}-config
+data:
+  SPOTIFY_CLIENT_ID: {{ .Values.spotify.clientId | quote }}
+  {{- if .Values.ingress.enabled }}
+  {{- $host := (index .Values.ingress.hosts 0).host }}
+  {{- if .Values.ingress.tls }}
+  SPOTIFY_REDIRECT_URI: {{ printf "https://%s/callback" $host | quote }}
+  {{- else }}
+  SPOTIFY_REDIRECT_URI: {{ printf "http://%s/callback" $host | quote }}
+  {{- end }}
+  {{- else }}
+  SPOTIFY_REDIRECT_URI: {{ .Values.spotify.redirectUri | quote }}
+  {{- end }}

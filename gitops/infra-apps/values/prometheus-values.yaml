@@ -1,0 +1,31 @@
+
+prometheus:
+  prometheusSpec:
+    serviceMonitorSelectorNilUsesHelmValues: false
+    serviceMonitorSelector: {}
+    serviceMonitorNamespaceSelector: {}
+    additionalScrapeConfigs:
+      - job_name: spotify-app
+        honor_labels: true
+        scrape_interval: 1m
+        scrape_timeout: 30s
+        metrics_path: /metrics
+        scheme: http
+        static_configs:
+          - targets:
+              - spotify-app.ddns.net
+
+grafana:
+  enabled: true
+  persistence:
+    enabled: true
+    type: sts
+    storageClassName: "gp2"
+    accessModes:
+      - ReadWriteOnce
+    size: 10Gi
+    finalizers:
+      - kubernetes.io/pvc-protection
+
+crds:
+  enabled: true

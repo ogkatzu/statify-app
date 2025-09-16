@@ -1,0 +1,55 @@
+replicaCount: 3
+
+image:
+  repository: 123456789012.dkr.ecr.us-west-2.amazonaws.com/demo/spotify-app
+  tag: 1.0.35
+  pullPolicy: Always
+
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 8000
+
+resources:
+  requests:
+    memory: "128Mi"
+    cpu: "100m"
+  limits:
+    memory: "256Mi"
+    cpu: "200m"
+
+app:
+  name: spotify-stats-app
+
+mongodb:
+  host: spotify-stat-app-mongodb-headless
+  port: 27017
+
+spotify:
+  clientId: "your_spotify_client_id_here"
+  redirectUri: "http://127.0.0.1:8000/callback"
+
+certManager:
+  enabled: true
+  clusterIssuer: "letsencrypt-prod"
+  server: "https://acme-v02.api.letsencrypt.org/directory"
+  email: "your-email@example.com"
+  privateKeySecretRef: "letsencrypt-prod"
+
+# Ingress configuration
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+  hosts:
+    - host: your-domain.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: your-domain-tls
+      hosts:
+        - your-domain.example.com

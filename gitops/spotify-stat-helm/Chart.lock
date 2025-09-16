@@ -1,0 +1,9 @@
+dependencies:
+- name: mongodb
+  repository: https://charts.bitnami.com/bitnami
+  version: 15.6.13
+- name: spotify-stat-app
+  repository: file://./charts/spotify-stat-app
+  version: 1.0.10
+digest: sha256:4ac9da6fc2b33ba599576d006b2168c80f0d8513588eb87e5db591780e8b7bf6
+generated: "2025-07-29T11:10:48.351894+03:00"

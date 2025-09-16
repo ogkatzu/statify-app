@@ -1,0 +1,46 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: spotify-stats-app
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: spotify-stats-app
+  template:
+    metadata:
+      labels:
+        app: spotify-stats-app
+    spec:
+      imagePullSecrets:
+      - name: ecr-registry-secret
+      containers:
+        - name: spotify-stats-app-container
+          image: 123456789012.dkr.ecr.us-west-2.amazonaws.com/demo/spotify-app:latest
+          ports:
+            - containerPort: 8000
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "256Mi"
+              cpu: "200m"
+          env:
+            - name: SPOTIFY_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: spotify-stats-app-secret
+                  key: spotify_client_secret
+            - name: SPOTIFY_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: spotify-stats-app-secret
+                  key: spotify_client_id
+            - name: SPOTIFY_REDIRECT_URI
+              valueFrom:
+                secretKeyRef:
+                  name: spotify-stats-app-secret
+                  key: spotify_redirect_uri
+            - name: MONGO_URL
+              value: "mongodb://my-app-mongodb:27017/"

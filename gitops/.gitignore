@@ -1,0 +1,6 @@
+secret.yaml
+/spotify-stat-app/secret.yaml
+/archive
+
+.DS_Store
+test_requests.py

@@ -1,0 +1,60 @@
+config:
+  logLevel: trace
+  service: |
+    [SERVICE]
+        Daemon Off
+        Flush 5
+        Log_Level debug
+        Parsers_File /fluent-bit/etc/parsers.conf
+        Parsers_File /fluent-bit/etc/conf/custom_parsers.conf
+        HTTP_Server On
+        HTTP_Listen 0.0.0.0
+        HTTP_Port 2020
+        Health_Check On
+        Trace_Error On
+
+  inputs: |
+    [INPUT]
+        Name tail
+        Path /var/log/containers/*spotify-stats-app*.log
+        Exclude_Path /var/log/containers/*mongodb*.log
+        Tag kube.*
+        Parser docker
+        Mem_Buf_Limit 50MB
+        Skip_Long_Lines On
+        Refresh_Interval 1
+        Read_from_Head true
+        Skip_Empty_Lines On
+
+  filters: |
+    [FILTER]
+        Name kubernetes
+        Match kube.*
+        Merge_Log On
+        Keep_Log Off
+        K8S-Logging.Parser On
+        Buffer_Size False
+
+  outputs: |
+    [OUTPUT]
+        Name es
+        Match kube.*
+        Index fluent-bit
+        Type _doc
+        Host elasticsearch.logging.svc.cluster.local
+        Port 9200
+        HTTP_User elastic
+        HTTP_Passwd 9sRLSqZOhtUpSpyn
+        tls On
+        tls.verify Off
+        Logstash_Format On
+        Logstash_Prefix logstash
+        Retry_Limit False
+        Suppress_Type_Name On
+
+# Required service configuration for the Helm chart
+service:
+  type: ClusterIP
+  port: 2020
+  labels: {}
+  annotations: {}

@@ -1,0 +1,57 @@
+<µ Spotify Stats Application deployed successfully!
+
+{{- if .Values.ingress.enabled }}
+{{- range .Values.ingress.hosts }}
+< Application URL: {{ if $.Values.ingress.tls }}https{{ else }}http{{ end }}://{{ .host }}
+{{- end }}
+
+=Ë Post-deployment checklist:
+{{- if .Values.ingress.tls }}
+1.  SSL Certificate: cert-manager will automatically provision an SSL certificate
+   - Check certificate status: kubectl get certificate {{ (index .Values.ingress.tls 0).secretName }} -n {{ .Release.Namespace }}
+{{- end }}
+
+2. = Spotify OAuth Configuration:
+   - Login to: https://developer.spotify.com/dashboard
+   - Select your application: {{ .Values.spotify.clientId }}
+   - Add redirect URI: {{ if .Values.ingress.tls }}https{{ else }}http{{ end }}://{{ (index .Values.ingress.hosts 0).host }}/callback
+
+3. < DNS Configuration:
+   - Ensure {{ (index .Values.ingress.hosts 0).host }} points to your LoadBalancer IP
+   - Get LoadBalancer IP: kubectl get svc -n ingress-nginx ingress-nginx-controller
+
+{{- else }}
+=' Ingress is disabled. To enable external access:
+
+1. Update values.yaml:
+   ingress:
+     enabled: true
+
+2. Access via port-forward:
+   kubectl port-forward svc/{{ .Values.app.name }}-service {{ .Values.service.port }}:{{ .Values.service.port }} -n {{ .Release.Namespace }}
+   
+   Then open: http://localhost:{{ .Values.service.port }}
+{{- end }}
+
+=Ê Application Status:
+- Release: {{ .Release.Name }}
+- Namespace: {{ .Release.Namespace }}
+- App Name: {{ .Values.app.name }}
+- Replicas: {{ .Values.replicaCount }}
+
+=à Useful Commands:
+# Check pod status
+kubectl get pods -l app={{ .Values.app.name }} -n {{ .Release.Namespace }}
+
+# View application logs
+kubectl logs -l app={{ .Values.app.name }} -n {{ .Release.Namespace }} --tail=50
+
+# Check service endpoints
+kubectl get endpoints {{ .Values.app.name }}-service -n {{ .Release.Namespace }}
+
+{{- if .Values.ingress.enabled }}
+# Check ingress status
+kubectl get ingress {{ .Values.app.name }}-ingress -n {{ .Release.Namespace }}
+{{- end }}
+
+<‰ Happy listening with your Spotify Stats app!

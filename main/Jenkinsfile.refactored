@@ -1,0 +1,38 @@
+@Library('spotify-jenkins-shared-library') _
+
+/*
+ * Spotify Portfolio Application CI/CD Pipeline
+ * 
+ * This pipeline has been refactored to use Jenkins shared libraries for:
+ * - Better maintainability and reusability
+ * - Cleaner separation of concerns
+ * - Consistent patterns across projects
+ * - Easier testing and debugging
+ * 
+ * Original pipeline: ~700 lines
+ * Refactored pipeline: ~30 lines
+ * 
+ * All functionality is preserved while dramatically simplifying the Jenkinsfile.
+ */
+
+// Pipeline configuration
+def pipelineConfig = [
+    // Docker configuration
+    imageName: 'spotify_app',
+    dockerRegistry: '123456789012.dkr.ecr.us-west-2.amazonaws.com',
+    ecrRepository: 'saar/spotify-app',
+    awsRegion: 'us-west-2',
+    
+    // Application configuration
+    spotifyRedirectUri: 'http://localhost:8000/callback',
+    
+    // GitHub configuration
+    githubRepoOwner: 'your-username',
+    githubRepoName: 'spotfy-stats-app',
+    
+    // Jenkins configuration
+    jenkinsHostBase: '/var/lib/docker/volumes/jenkins-project_jenkins_home/_data'
+]
+
+// Execute the complete CI/CD pipeline
+spotifyAppPipeline(pipelineConfig)
