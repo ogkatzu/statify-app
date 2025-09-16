@@ -1,0 +1,91 @@
+services:
+  app:
+    image: ${IMAGE_NAME:-spotify_app_test}:latest
+    ports:
+      - "8000:8000"
+    environment:
+      - SPOTIFY_CLIENT_ID=${SPOTIFY_CLIENT_ID:-test_client_id}
+      - SPOTIFY_CLIENT_SECRET=${SPOTIFY_CLIENT_SECRET:-test_client_secret}
+      - SPOTIFY_REDIRECT_URI=${SPOTIFY_REDIRECT_URI:-http://localhost:8000/callback}
+    volumes:
+      - static_files:/app/static
+    depends_on:
+      - mongodb
+    networks:
+      - backend
+      - frontend
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  mongodb:
+    image: mongo:7
+    container_name: mongodb
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb_data:/data/db
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  nginx:
+    build:
+      context: .
+      dockerfile: Dockerfile-nginx
+    container_name: nginx
+    ports:
+      - "9080:80"
+      - "9443:443"
+    volumes:
+      - certbot_certs:/etc/letsencrypt
+      - certbot_www:/var/www/certbot
+      - static_files:/var/www/static
+    depends_on:
+      - app
+    networks:
+      - frontend
+
+  certbot:
+    image: certbot/certbot:latest
+    container_name: certbot
+    volumes:
+      - certbot_certs:/etc/letsencrypt
+      - certbot_www:/var/www/certbot
+    depends_on:
+      - nginx
+
+  test:
+    container_name: spotify_app_test
+    image: ${IMAGE_NAME:-spotify_app_test}:latest
+    environment:
+      - SPOTIFY_CLIENT_ID=${SPOTIFY_CLIENT_ID:-test_client_id}
+      - SPOTIFY_CLIENT_SECRET=${SPOTIFY_CLIENT_SECRET:-test_client_secret}
+      - SPOTIFY_REDIRECT_URI=${SPOTIFY_REDIRECT_URI:-http://localhost:8000/callback}
+      - TEST_TYPE=${TEST_TYPE:-unit}
+    command: ["bash", "tests/test.sh"]
+    depends_on:
+      - mongodb
+    networks:
+      - backend
+      - frontend
+
+volumes:
+  mongodb_data:
+  certbot_certs:
+  certbot_www:
+  static_files:
+
+networks:
+  frontend:
+    driver: bridge
+  backend:
+    driver: bridge

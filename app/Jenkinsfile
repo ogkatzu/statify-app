@@ -1,0 +1,713 @@
+pipeline {
+    agent any
+    
+    environment {
+        IMAGE_NAME = 'spotify_app'
+        DOCKER_REGISTRY = '123456789012.dkr.ecr.us-west-2.amazonaws.com'
+        ECR_REPOSITORY = 'demo/spotify-app'
+        AWS_REGION = 'us-west-2'
+        SPOTIFY_REDIRECT_URI = 'http://localhost:8000/callback'
+        GITHUB_REPO_OWNER = 'your-username'
+        GITHUB_REPO_NAME = 'spotfy-stats-app'
+        JENKINS_HOST_BASE = '/var/lib/docker/volumes/jenkins-project_jenkins_home/_data'
+        SLACK_THREAD_TS = ''
+    }
+
+    options {
+        timeout(time: 10, unit: 'MINUTES')
+        timestamps() 
+    }
+    
+    stages {
+        stage('Setup & Checkout') {
+            steps {
+                script {
+                        def slackResponse = slackSend(
+                        channel: "spotify-app-builds",
+                        message: "🚀 Build started for *${env.JOB_NAME}* #${env.BUILD_NUMBER}\n<${env.BUILD_URL}|View Build>",
+                        color: "good",
+                    )
+                env.SLACK_THREAD_ID = slackResponse.threadId ?: ''
+                echo "Slack thread ID: ${env.SLACK_THREAD_ID}"
+                }
+                script {
+                    updateGitHubStatus('pending', 'Jenkins build started')
+                    echo "====== Setting up environment ======"
+                    echo "Branch: ${env.BRANCH_NAME}"
+                    echo "Build Number: ${env.BUILD_NUMBER}"
+                    
+                    // Load Spotify credentials
+                    withCredentials([usernamePassword(credentialsId: 'spotify-client', usernameVariable: 'CLIENT_ID', passwordVariable: 'CLIENT_SECRET')]) {
+                        env.SPOTIFY_CLIENT_ID = env.CLIENT_ID
+                        env.SPOTIFY_CLIENT_SECRET = env.CLIENT_SECRET
+                        
+                        echo "Credentials loaded successfully"
+                        echo "Client ID length: ${env.CLIENT_ID.length()}"
+                        echo "Secret length: ${env.CLIENT_SECRET.length()}"
+                    }
+                    
+                    // Calculate the host path for this workspace
+                    def jenkinsWorkspace = env.WORKSPACE
+                    def hostWorkspace = jenkinsWorkspace.replace('/var/jenkins_home', env.JENKINS_HOST_BASE)
+                    env.HOST_WORKSPACE = hostWorkspace
+                    
+                    echo "=== Path Mapping ==="
+                    echo "Jenkins workspace: ${jenkinsWorkspace}"
+                    echo "Host workspace: ${env.HOST_WORKSPACE}"
+                }
+            }
+        }
+        
+        stage('Build') {
+            steps {
+                script {
+                    SendSlackMessage("🔨 Building Docker Image", "good")
+                    updateGitHubStatus('pending', 'Building Docker image')
+                    echo "====== Building Docker image ======" 
+                    sh """
+                        docker build -t ${IMAGE_NAME}:${env.BUILD_NUMBER} .
+                        docker tag ${IMAGE_NAME}:${env.BUILD_NUMBER} ${IMAGE_NAME}:latest
+                    """
+                    
+                    sh 'docker images | grep spotify'
+                }
+            }
+        }
+        
+        stage('Test - Unit') {
+            steps {
+                script {
+                    updateGitHubStatus('pending', 'Running unit tests')
+                    echo "====== Running unit tests ======"
+                    SendSlackMessage("🧪 Running unit Tests", "good")
+                    try {
+                        // Clean up any existing containers
+                        sh 'docker stop spotify_app || true'
+                        sh 'docker rm spotify_app || true'
+                        
+                        // Verify the host path exists
+                        sh """
+                            echo "=== Verifying Host Path ==="
+                            echo "Host workspace: ${env.HOST_WORKSPACE}"
+                            ls -la "${env.HOST_WORKSPACE}" || echo "Host path not accessible from Jenkins container"
+                            
+                            # Test volume mount with a simple container first
+                            echo "Testing volume mount..."
+                            docker run --rm -v "${env.HOST_WORKSPACE}:/test_workspace" alpine:latest ls -la /test_workspace | head -10
+                        """
+                        runUnitTests()
+                        // Check exit code
+                        def exitCode = sh(script: 'docker inspect -f "{{.State.ExitCode}}" spotify_app_test', returnStdout: true).trim()
+                        echo "Container exit code: ${exitCode}"
+                        
+                        if (exitCode != '0') {
+                            throw new Exception("Unit tests failed with exit code: ${exitCode}")
+                        }
+                        
+                        echo "Unit tests completed successfully"
+                        
+                    } catch (Exception e) {
+                        echo "Unit test failure: ${e.getMessage()}"
+                        //sh 'docker logs spotify_app_test || true'
+                        currentBuild.result = 'FAILURE'
+                        return
+                    } finally {
+                        // Show logs and cleanup
+                        //sh 'docker logs spotify_app_test || true'
+                        sh 'docker rm spotify_app_test || true'
+                    }
+                }
+            }
+            post{
+                always {
+                    script {
+                        // Update GitHub status after unit tests
+                        if (currentBuild.result == 'SUCCESS') {
+                            updateGitHubStatus('success', 'Unit tests passed')
+                            SendSlackMessage("✅ Unit tests completed successfully", "good")
+                        } else {
+                            SendSlackMessage("❌ *Unit Test Stage* - Unit Tests FAILED", "danger")
+                            updateGitHubStatus('failure', 'Unit tests failed')
+                        }
+                    }
+                }
+            }
+        }
+        
+        stage('Test - Integration') {
+            when {
+                allOf {
+                    anyOf {
+                        branch 'main'
+                        branch 'feature/*'
+                    }
+                    not { 
+                        equals expected: 'FAILURE', actual: currentBuild.result 
+                    }
+                }
+            }
+            steps {
+                script {
+                    updateGitHubStatus('pending', 'Running integration tests')
+                    SendSlackMessage("🧪 Running Integration Tests", "good")
+                    echo "====== Running integration tests ======"
+                    
+                    try {
+                        // Start MongoDB for integration tests
+                        sh 'docker run -d --name mongodb_integration_test -p 27017:27017 mongo:7'
+                        sleep 15
+                        
+                        // Wait for MongoDB to be ready
+                        sh '''
+                            echo "Waiting for MongoDB to be ready..."
+                            for i in {1..30}; do
+                                if docker exec mongodb_integration_test mongosh --eval "db.adminCommand('ping')" >/dev/null 2>&1; then
+                                    echo "MongoDB is ready!"
+                                    break
+                                fi
+                                echo "Waiting for MongoDB... ($i/30)"
+                                sleep 2
+                            done
+                        '''
+
+                        runIntegrationTests()
+                        def exitCode = sh(script: 'docker inspect -f "{{.State.ExitCode}}" spotify_integration_test', returnStdout: true).trim()
+                        echo "Integration test exit code: ${exitCode}"
+                        
+                        if (exitCode != '0') {
+                            throw new Exception("Integration tests failed with exit code: ${exitCode}")
+                        }
+                        
+                        echo "Integration tests completed successfully"
+                        SendSlackMessage("✅ Integration tests completed successfully", "good")
+                    } catch (Exception e) {
+                        echo "Integration test failure: ${e.getMessage()}"
+                        //sh 'docker logs spotify_integration_test || true'
+                        currentBuild.result = 'FAILURE'
+                        updateGitHubStatus('failure', 'Integration tests failed')
+                        SendSlackMessage("❌ *Integration Test Stage* - Integration Tests FAILED", "danger")
+                        return
+                    } finally {
+                        // sh 'docker logs spotify_integration_test || true'
+                        sh 'docker rm spotify_integration_test || true'
+                        sh 'docker stop mongodb_integration_test || true'
+                        sh 'docker rm mongodb_integration_test || true'
+                    }
+                }
+            }
+        }
+        stage('E2E testing') {
+        when {
+            allOf {
+                    anyOf {
+                        branch 'main'
+                        branch 'feature/*'
+                    }
+                    not { 
+                        equals expected: 'FAILURE', actual: currentBuild.result 
+                    }
+                }
+            }
+            steps{
+                script{
+                    updateGitHubStatus('pending', 'Running E2E tests')
+                    SendSlackMessage("🧪 Running E2E Tests", "good")
+                    echo "====== E2E Tests using Docker-Compose======"
+                    runE2ETests()
+                }
+            }
+            post {
+                always {
+                    script {
+                        // Update GitHub status after E2E tests
+                        if (currentBuild.result == 'SUCCESS') {
+                            updateGitHubStatus('success', 'E2E tests passed')
+                            SendSlackMessage("✅ E2E tests completed successfully", "good")
+                        } else {
+                            SendSlackMessage("❌ *E2E Test Stage* - E2E Tests FAILED", "danger")
+                            updateGitHubStatus('failure', 'E2E tests failed')
+                        }
+                    }
+                }
+            }
+        }
+    
+        stage('Tag & Push') {
+            when {
+                allOf {
+                    branch 'main'
+                    not { 
+                        equals expected: 'FAILURE', actual: currentBuild.result 
+                    }
+                }
+            }
+            steps {
+                script {
+                    SendSlackMessage("📥 *Push Stage* - Pushing Docker Image to ECR", "good")
+                    updateGitHubStatus('pending', 'Pushing Docker image to ECR')
+                    echo "====== Tagging and pushing release version ======"
+                    
+                    try {
+                        def version = getNextVersion()
+                        env.RELEASE_VERSION = version  // Store version for CD stage
+                        
+                        sh """
+                            docker tag ${IMAGE_NAME}:latest ${IMAGE_NAME}:${version}
+                            docker tag ${IMAGE_NAME}:latest ${DOCKER_REGISTRY}/${ECR_REPOSITORY}:${version}
+                            docker tag ${IMAGE_NAME}:latest ${DOCKER_REGISTRY}/${ECR_REPOSITORY}:latest
+                        """
+                        
+                        sh """
+                            aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${DOCKER_REGISTRY}
+                            docker push ${DOCKER_REGISTRY}/${ECR_REPOSITORY}:${version}
+                            docker push ${DOCKER_REGISTRY}/${ECR_REPOSITORY}:latest
+                        """
+                        
+                        echo "Successfully pushed image with version: ${version}"
+                        TagGitVersion(version)
+                        updateGitHubStatus('success', 'Docker image pushed to ECR and tagged')
+                    } catch (Exception e) {
+                        echo "Warning: Failed to push to ECR: ${e.getMessage()}"
+                        throw e
+                    }
+                }
+            }
+        }
+        
+        stage('Deploy to GitOps') {
+            when {
+                allOf {
+                    branch 'main'
+                    not { 
+                        equals expected: 'FAILURE', actual: currentBuild.result 
+                    }
+                }
+            }
+            steps {
+                script {
+                    SendSlackMessage("🚀 *CD Stage* - Updating GitOps Repository", "good")
+                    updateGitHubStatus('pending', 'Updating GitOps repository with new version')
+                    echo "====== Deploying to GitOps Repository ======"
+                    
+                    try {
+                        def version = env.RELEASE_VERSION
+                        echo "Deploying version: ${version}"
+                        
+                        // Clone GitOps repository
+                        cloneGitOpsRepo()
+                        
+                        // Update Helm chart versions
+                        updateHelmChartVersions(version)
+                        
+                        // Commit and push changes
+                        commitAndPushGitOpsChanges(version)
+                        
+                        SendSlackMessage("✅ *CD Stage* - GitOps repository updated successfully with version ${version}", "good")
+                        updateGitHubStatus('success', "GitOps updated - ArgoCD will sync version ${version}")
+                        
+                    } catch (Exception e) {
+                        echo "GitOps deployment failed: ${e.getMessage()}"
+                        SendSlackMessage("❌ *CD Stage* - GitOps update failed: ${e.getMessage()}", "warning") 
+                        updateGitHubStatus('failure', 'GitOps update failed')
+                        // Don't fail the entire pipeline for CD issues
+                        currentBuild.result = 'UNSTABLE'
+                    } finally {
+                        // Cleanup GitOps repository
+                        cleanupGitOpsRepo()
+                    }
+                }
+            }
+        }
+        
+        stage('Cleanup') {
+            steps {
+                script {
+                    echo "Final cleanup..."
+                    
+                    sh '''
+                        # Clean up containers
+                        docker ps -aq --filter "name=spotify" | xargs -r docker rm -f || true
+                        docker ps -aq --filter "name=mongodb" | xargs -r docker rm -f || true
+                        docker compose down --remove-orphans || true
+                        docker system prune -f || true
+                    '''
+                }
+            }
+        }
+    }
+    
+    post {
+        always {
+            echo "Pipeline completed for branch: ${env.BRANCH_NAME}"
+        }
+        
+        success {
+            echo "Pipeline completed successfully!"
+            updateGitHubStatus('success', 'Build successful - ready for deployment')
+            script {
+                if (env.BRANCH_NAME == 'main') {
+                    echo "🚀 Main branch build successful - ready for deployment"
+                }
+                SendSlackMessage("*Job Ended* - Build Successful", "good")
+            }
+        }
+        
+        failure {
+            echo "Pipeline failed!"
+            updateGitHubStatus('failure', 'Build failed - check logs for details')
+            SendSlackMessage("*Job Ended* - Build Failed", "danger")
+        }
+    }
+}
+
+
+// ###################################################################################### //
+// ============================== Helper Functions ====================================== //
+// ###################################################################################### //
+
+def SendSlackMessage(String message, String color) {
+    slackSend(
+        channel: env.SLACK_THREAD_ID ?: "C091L237S59",
+        message: message,
+        color: color
+    )
+}
+
+def runUnitTests() {
+    sh """
+        docker run --name spotify_app_test \
+            -e SPOTIFY_CLIENT_ID='${env.SPOTIFY_CLIENT_ID}' \
+            -e SPOTIFY_CLIENT_SECRET='${env.SPOTIFY_CLIENT_SECRET}' \
+            -e SPOTIFY_REDIRECT_URI='${SPOTIFY_REDIRECT_URI}' \
+            -e TEST_TYPE=unit \
+            -v "${env.HOST_WORKSPACE}:/workspace" \
+            -w /workspace \
+            ${IMAGE_NAME}:latest \
+            bash -c "
+                echo '=== Test Environment Setup ==='
+                # Install dependencies
+                echo '=== Installing Dependencies ==='
+                pip install -r /workspace/requirements.txt
+                pip install -r /workspace/tests/requirements.txt
+                
+                # Run tests
+                echo '=== Running Tests ==='
+                if [ -f /workspace/tests/test.sh ]; then
+                    echo 'Running test.sh script...'
+                    chmod +x /workspace/tests/test.sh
+                    cd /workspace && bash tests/test.sh
+                else
+                    echo 'Running pytest directly...'
+                    cd /workspace/tests
+                    python -m pytest test_main.py -v
+                fi
+                
+                echo '=== Test Execution Completed ==='
+            "
+    """
+}
+
+def runIntegrationTests() { 
+    // Run integration tests
+    sh """
+        docker run --name spotify_integration_test \
+            --link mongodb_integration_test:mongodb \
+            -e SPOTIFY_CLIENT_ID='${env.SPOTIFY_CLIENT_ID}' \
+            -e SPOTIFY_CLIENT_SECRET='${env.SPOTIFY_CLIENT_SECRET}' \
+            -e SPOTIFY_REDIRECT_URI='${SPOTIFY_REDIRECT_URI}' \
+            -e TEST_TYPE=integration \
+            -v "${env.HOST_WORKSPACE}:/workspace" \
+            -w /workspace \
+            ${IMAGE_NAME}:latest \
+            bash -c "
+                echo '=== Integration Test Setup ==='
+                
+                # Install dependencies
+                pip install -r /workspace/requirements.txt
+                pip install -r /workspace/tests/requirements.txt
+                
+                # Run integration tests
+                if [ -f /workspace/tests/test.sh ]; then
+                    chmod +x /workspace/tests/test.sh
+                    cd /workspace && bash tests/test.sh
+                else
+                    cd /workspace/tests
+                    python -m pytest test_integration.py -v
+                fi
+            "
+    """
+}
+def runE2ETests() {
+    sh """
+        # Navigate to main directory (if not already there)
+        cd main || cd /var/jenkins_home/workspace/test-app
+
+        # Clean up any existing containers
+        docker compose down --remove-orphans || true
+        docker stop nginx_test || true
+        docker rm nginx_test || true
+
+        # Build both images first
+        echo "=== Building application image ==="
+        docker build -t spotify_app_test:latest .
+
+        echo "=== Building nginx image ==="
+        docker build -t nginx_test:latest -f Dockerfile-nginx .
+
+        # Start app and mongodb with docker compose
+        echo "=== Starting services ==="
+        docker compose up -d app mongodb
+
+        # Start nginx with custom ports using docker run
+        echo "=== Starting nginx on custom ports ==="
+        docker run -d --name nginx_test \
+            --network test-app_frontend \
+            -p 9080:80 \
+            -p 9443:443 \
+            -v test-app_certbot_certs:/etc/letsencrypt \
+            -v test-app_certbot_www:/var/www/certbot \
+            -v test-app_static_files:/var/www/static \
+            nginx_test:latest
+
+        # Wait for services to be healthy
+        echo "Waiting for services to start..."
+        sleep 15
+
+        # Check if containers are running
+        docker compose ps
+        docker ps --filter name=nginx_test
+
+        echo "=== Running integration tests ==="
+        TEST_TYPE=integration docker compose run --rm test
+
+        # Check integration test exit code
+        if [ \$? -eq 0 ]; then
+            echo "E2E tests passed [V]"
+        else
+            echo "E2E tests failed [X]"
+            exit 1
+        fi
+        
+        # Force a failure for testing (remove this line once you've tested)
+        # Show final container status
+        # Cleanup
+        docker compose down
+        docker stop nginx_test || true
+        docker rm nginx_test || true
+        echo "=== Test completed ==="
+    """
+}
+def getNextVersion() {
+    try {
+        // Try to fetch tags with credentials, but don't fail if it doesn't work
+        try {
+            withCredentials([sshUserPrivateKey(credentialsId: 'github-main', keyFileVariable: 'SSH_KEY')]) {
+                sh '''
+                    export GIT_SSH_COMMAND="ssh -i $SSH_KEY -o StrictHostKeyChecking=no"
+                    git fetch --tags
+                '''
+            }
+        } catch (Exception fetchException) {
+            echo "Could not fetch remote tags, using local tags only: ${fetchException.getMessage()}"
+        }
+        
+        // Get the latest semantic version tag from local repository
+        def latestTag = sh(
+            script: '''
+                git tag -l | grep -E "^[0-9]+\\.[0-9]+\\.[0-9]+\$" | sort -V | tail -1
+            ''',
+            returnStdout: true
+        ).trim()
+        
+        echo "Latest tag found: ${latestTag}"
+        
+        if (latestTag == "") {
+            // No existing tags, start with 1.0.0
+            echo "No existing version tags found, starting with 1.0.0"
+            return "1.0.0"
+        }
+        
+        // Parse the version and split by dots
+        def versionParts = latestTag.split('\\.')
+        def major = versionParts[0] as Integer
+        def minor = versionParts[1] as Integer  
+        def patch = versionParts[2] as Integer
+        
+        // Increment patch version
+        patch += 1
+        
+        def newVersion = "${major}.${minor}.${patch}"
+        echo "Next version: ${newVersion}"
+        
+        return newVersion
+        
+    } catch (Exception e) {
+        echo "Error getting version, falling back to build number: ${e.getMessage()}"
+        return "1.0.${env.BUILD_NUMBER}"
+    }
+}
+
+def TagGitVersion(String version) {
+    try {
+        echo "====== Tagging Git Version ======"
+        sh """
+            git config user.name 'Jenkins CI'
+            git config user.email 'jenkins@example.com'
+        """
+        echo "Tagging Git with version: ${version}"
+        withCredentials([sshUserPrivateKey(credentialsId: 'github-main', keyFileVariable: 'SSH_KEY')]) {
+            sh """
+                export GIT_SSH_COMMAND="ssh -i $SSH_KEY -o StrictHostKeyChecking=no"
+                git tag -a ${version} -m "Release version ${version}"
+                git push origin ${version}
+            """
+        }
+
+        
+    } catch (Exception e) {
+        echo "Failed to tag Git version: ${e.getMessage()}"
+    }
+}
+
+// Function to update GitHub commit status
+def updateGitHubStatus(String state, String description) {
+    try {
+        // Get the current commit SHA
+        def commitSha = sh(script: 'git rev-parse HEAD', returnStdout: true).trim()
+        
+        echo "Updating GitHub status: ${state} - ${description}"
+        echo "Commit SHA: ${commitSha}"
+        
+        withCredentials([string(credentialsId: 'github-token', variable: 'GITHUB_TOKEN')]) {
+            def statusUrl = "https://api.github.com/repos/${env.GITHUB_REPO_OWNER}/${env.GITHUB_REPO_NAME}/statuses/${commitSha}"
+            def buildUrl = "${env.BUILD_URL}"
+            
+            sh """
+                curl -L -X POST \
+                    -H "Authorization: token \${GITHUB_TOKEN}" \
+                    -H "Content-Type: application/json" \
+                    -H "User-Agent: Jenkins" \
+                    -d '{"state":"${state}","target_url":"${buildUrl}","description":"${description}","context":"jenkins/build"}' \
+                    "${statusUrl}"
+            """
+        }
+        
+    } catch (Exception e) {
+        echo "Failed to update GitHub status: ${e.getMessage()}"
+        // Don't fail the build if status update fails
+    }
+}
+
+// Function to clone GitOps repository
+def cloneGitOpsRepo() {
+    echo "====== Cloning GitOps Repository ======"
+    
+    // Define GitOps repository details
+    env.GITOPS_REPO_URL = 'git@github.com:your-username/spotify-stats-gitops.git'
+    env.GITOPS_WORKSPACE = "${env.WORKSPACE}/gitops-repo"
+    
+    // Remove any existing GitOps workspace
+    sh "rm -rf ${env.GITOPS_WORKSPACE}"
+    
+    withCredentials([sshUserPrivateKey(credentialsId: 'gitops-ssh-key', keyFileVariable: 'SSH_KEY')]) {
+        sh """
+            export GIT_SSH_COMMAND="ssh -i $SSH_KEY -o StrictHostKeyChecking=no"
+            git clone ${env.GITOPS_REPO_URL} ${env.GITOPS_WORKSPACE}
+            cd ${env.GITOPS_WORKSPACE}
+            git checkout main
+            git config user.name 'Jenkins CI'
+            git config user.email 'jenkins@example.com'
+        """
+    }
+    
+    echo "GitOps repository cloned successfully"
+}
+
+// Function to update Helm chart versions
+def updateHelmChartVersions(String version) {
+    echo "====== Updating Helm Chart Versions ======"
+    echo "Updating charts to version: ${version}"
+    
+    // Update umbrella chart version and appVersion
+    sh """
+        cd ${env.GITOPS_WORKSPACE}
+        
+        # Update umbrella chart (spotify-stat-helm/Chart.yaml)
+        # Using sed -i (replace in-place) to update version and appVersion
+        sed -i "s/^version: .*/version: ${version}/" spotify-stat-helm/Chart.yaml
+        sed -i "s/^appVersion: .*/appVersion: \\"${version}\\"/" spotify-stat-helm/Chart.yaml
+        
+        # Update app chart version and appVersion (spotify-stat-helm/charts/spotify-stat-app/Chart.yaml)
+        sed -i "s/^version: .*/version: ${version}/" spotify-stat-helm/charts/spotify-stat-app/Chart.yaml
+        sed -i "s/^appVersion: .*/appVersion: \\"${version}\\"/" spotify-stat-helm/charts/spotify-stat-app/Chart.yaml
+        
+        # Update image tag in app chart values.yaml
+        sed -i "s/tag: .*/tag: ${version}/" spotify-stat-helm/charts/spotify-stat-app/values.yaml
+        
+        # Update dependency version in umbrella chart
+        # Replace only in ragne from name: spotify-stat-app to repository: file
+        sed -i "/name: spotify-stat-app/,/repository: file/ s/version: .*/version: ${version}/" spotify-stat-helm/Chart.yaml
+        
+        echo "=== Chart version updates ==="
+        echo "Umbrella chart:"
+        grep -E "(version|appVersion):" spotify-stat-helm/Chart.yaml
+        echo "App chart:"
+        grep -E "(version|appVersion):" spotify-stat-helm/charts/spotify-stat-app/Chart.yaml
+        echo "Image tag:"
+        grep -E "tag:" spotify-stat-helm/charts/spotify-stat-app/values.yaml
+        echo "Dependency version:"
+        grep -A3 -B1 "name: spotify-stat-app" spotify-stat-helm/Chart.yaml
+    """
+    
+    echo "Helm chart versions updated successfully"
+}
+
+// Function to commit and push GitOps changes
+def commitAndPushGitOpsChanges(String version) {
+    echo "====== Committing and Pushing GitOps Changes ======"
+    
+    withCredentials([sshUserPrivateKey(credentialsId: 'gitops-ssh-key', keyFileVariable: 'SSH_KEY')]) {
+        sh """
+            cd ${env.GITOPS_WORKSPACE}
+            export GIT_SSH_COMMAND="ssh -i $SSH_KEY -o StrictHostKeyChecking=no"
+            
+            # Check if there are any changes
+            if ! git diff --quiet; then
+                echo "Changes detected, committing..."
+                
+                # Add all changed files
+                git add -A
+                
+                # Create commit message
+                git commit -m "Release version ${version}
+
+- Update Helm chart versions to ${version}
+- Update appVersion to ${version}
+- Update dependency versions
+- Triggered by Jenkins build #${env.BUILD_NUMBER}
+
+Generated with Jenkins CI
+
+Co-Authored-By: Jenkins <jenkins@example.com>"
+                
+                # Push changes
+                git push origin main
+                
+                echo "GitOps changes pushed successfully"
+            else
+                echo "No changes detected in GitOps repository"
+            fi
+        """
+    }
+}
+
+// Function to cleanup GitOps repository
+def cleanupGitOpsRepo() {
+    echo "====== Cleaning up GitOps Repository ======"
+    try {
+        sh "rm -rf ${env.GITOPS_WORKSPACE}"
+        echo "✅ GitOps workspace cleaned up"
+    } catch (Exception e) {
+        echo "Warning: Failed to cleanup GitOps workspace: ${e.getMessage()}"
+    }
+}
